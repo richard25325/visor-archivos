@@ -1,8 +1,9 @@
 import html
+import os
 from pathlib import Path
 from PySide6.QtCore import QThread, Qt, QSettings, QDir, QTimer
-from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QCheckBox,QHBoxLayout,QLineEdit,QMainWindow,QPushButton,QSplitter,QStatusBar,QTextBrowser,QTreeWidget,QTreeWidgetItem,QVBoxLayout,QWidget,QFileDialog,QMessageBox,QStackedWidget,QScrollArea,QLabel,QListWidget,QListWidgetItem
+from PySide6.QtGui import QImage, QKeySequence, QShortcut
+from PySide6.QtWidgets import QCheckBox,QHBoxLayout,QLineEdit,QMainWindow,QPushButton,QSplitter,QStatusBar,QTextBrowser,QTreeWidget,QTreeWidgetItem,QVBoxLayout,QWidget,QFileDialog,QMessageBox,QStackedWidget,QScrollArea,QLabel,QListWidget,QListWidgetItem,QDialog
 try:
     import pymupdf as fitz
 except ImportError:
@@ -17,12 +18,14 @@ class MainWindow(QMainWindow):
         super().__init__(); self.setWindowTitle("Visor documental institucional"); self.resize(1200,760); self.catalog=Catalog(database_path()); self.settings=QSettings("VisorDocumental", "VisorDocumental"); saved=self.settings.value("root_folder", ""); self.root=Path(saved) if saved and Path(saved).is_dir() else None
         self.search=QLineEdit(); self.search.setPlaceholderText("Buscar documento o subíndice…"); self.search.textChanged.connect(self.load_tree)
         self.quick_view=QCheckBox("Vista rápida"); self.quick_view.setChecked(True); self.quick_view.toggled.connect(self.refresh_preview)
-        self.choose=QPushButton("Seleccionar carpeta"); self.choose.clicked.connect(self.choose_folder); self.index=QPushButton("Actualizar catálogo"); self.index.clicked.connect(lambda: self.start_index(True))
-        bar=QHBoxLayout(); bar.addWidget(self.choose); bar.addWidget(self.index); bar.addWidget(self.search); bar.addWidget(self.quick_view)
+        self.choose=QPushButton("Seleccionar carpeta"); self.choose.clicked.connect(self.choose_folder); self.index=QPushButton("Actualizar catálogo"); self.index.clicked.connect(lambda: self.start_index(True)); self.open_original=QPushButton("Abrir documento original"); self.open_original.setEnabled(False); self.open_original.clicked.connect(self.open_original_document)
+        bar=QHBoxLayout(); bar.addWidget(self.choose); bar.addWidget(self.index); bar.addWidget(self.open_original); bar.addWidget(self.search); bar.addWidget(self.quick_view)
         self.tree=QTreeWidget(); self.tree.setHeaderLabel("Biblioteca documental"); self.tree.itemClicked.connect(self.show_document); self.preview=QTextBrowser(); self.full_preview=QTextBrowser(); self.full_preview.setReadOnly(True); self.page_widget=QWidget(); self.page_layout=QVBoxLayout(self.page_widget); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(self.page_widget); self.pdf_scroll=scroll; self.preview_stack=QStackedWidget(); self.preview_stack.addWidget(self.preview); self.preview_stack.addWidget(self.full_preview); self.preview_stack.addWidget(scroll); split=QSplitter(); split.addWidget(self.tree); split.addWidget(self.preview_stack)
         central=QWidget(); layout=QVBoxLayout(central); layout.addLayout(bar); layout.addWidget(split); self.setCentralWidget(central); self.setStatusBar(QStatusBar()); self.load_tree()
         if self.root:
             QTimer.singleShot(300, self.start_index)
+        self.search_box_shortcut=QShortcut(QKeySequence("Ctrl+F"),self)
+        self.search_box_shortcut.activated.connect(self.open_global_search)
     def choose_folder(self):
         start="F:/" if QDir("F:/").exists() else QDir.rootPath()
         dialog=QFileDialog(self,"Seleccionar carpeta raíz",start)
@@ -63,9 +66,23 @@ class MainWindow(QMainWindow):
         section=None; file_id=value
         if isinstance(value,str) and value.startswith("section:"):
             section_id=int(value.split(":",1)[1]); section=self.catalog.db.execute("SELECT * FROM sections WHERE id=?",(section_id,)).fetchone(); file_id=section["file_id"]
-        row=self.catalog.db.execute("SELECT * FROM files WHERE id=?",(file_id,)).fetchone(); self.current_row=row; self.current_section=section; self.refresh_preview()
+        row=self.catalog.db.execute("SELECT * FROM files WHERE id=?",(file_id,)).fetchone(); self.current_row=row; self.current_section=section; self.open_original.setEnabled(bool(row and Path(row["path"]).exists())); self.refresh_preview()
         if section and str(row["ext"]).lower()==".pdf" and self.quick_view.isChecked():
             self.quick_view.setChecked(False)
+
+    def open_global_search(self):
+        dialog=QDialog(self); dialog.setWindowTitle("Buscar en documentos"); dialog.resize(620,420)
+        query=QLineEdit(dialog); query.setPlaceholderText("Escriba una palabra o frase..."); results=QListWidget(dialog)
+        layout=QVBoxLayout(dialog); layout.addWidget(query); layout.addWidget(results)
+        def update_results(text):
+            results.clear()
+            for row in self.catalog.search(text,self.root):
+                item=QListWidgetItem(f"{row['title']}  —  {row['path']}"); item.setData(Qt.ItemDataRole.UserRole,row["id"]); results.addItem(item)
+        def open_result(item):
+            row=self.catalog.db.execute("SELECT * FROM files WHERE id=?",(item.data(Qt.ItemDataRole.UserRole),)).fetchone()
+            if row:
+                self.current_row=row; self.current_section=None; self.open_original.setEnabled(Path(row["path"]).exists()); self.refresh_preview(); dialog.accept()
+        query.textChanged.connect(update_results); results.itemClicked.connect(open_result); query.setFocus(); dialog.exec()
 
     def refresh_preview(self):
         row=getattr(self,"current_row",None)
@@ -80,6 +97,16 @@ class MainWindow(QMainWindow):
             self.preview_stack.setCurrentIndex(0); self.preview.setHtml(body+"<pre>"+html.escape(text)+"</pre>")
         else:
             self.render_original(row, body, text, section)
+
+    def open_original_document(self):
+        row=getattr(self,"current_row",None)
+        if not row or not Path(row["path"]).exists():
+            QMessageBox.warning(self,"Documento no disponible","El archivo original no existe en su ubicación.")
+            return
+        try:
+            os.startfile(row["path"])
+        except OSError as error:
+            QMessageBox.critical(self,"No se pudo abrir",str(error))
 
     def render_original(self, row, body, text, section=None):
         extension=Path(row["path"]).suffix.lower()
