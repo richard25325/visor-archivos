@@ -5,7 +5,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('.venv/Lib/site-packages/pymupdf/layout/resources/onnx', 'pymupdf/layout/resources/onnx')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
